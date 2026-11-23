@@ -17,6 +17,7 @@ from numpy.testing import assert_raises
 from scipy.stats import rankdata
 from sklearn import __version__ as sklearn_version
 from sklearn.base import clone
+from sklearn.covariance import EmpiricalCovariance
 from sklearn.metrics import roc_auc_score
 
 # temporary solution for relative imports in case pyod is not installed
@@ -241,6 +242,67 @@ class TestPCA(unittest.TestCase):
 
     def tearDown(self):
         pass
+
+
+class TestPCAScoreDefinition(unittest.TestCase):
+    """The score must follow Shyu et al. (2003): sum_j y_j^2 / lambda_j with
+    y_j the projection of the centered sample onto eigenvector v_j. Summed
+    over all components this is the squared Mahalanobis distance."""
+
+    def setUp(self):
+        rng = np.random.RandomState(0)
+        a = rng.normal(size=2000)
+        self.X = np.c_[a, 0.95 * a + 0.31 * rng.normal(size=2000)]
+        self.clf = PCA().fit(self.X)
+
+    def test_full_pca_score_equals_mahalanobis(self):
+        n = self.X.shape[0]
+        maha = EmpiricalCovariance().fit(self.X).mahalanobis(self.X)
+        # sklearn PCA uses ddof=1, EmpiricalCovariance uses ddof=0
+        assert_allclose(self.clf.decision_scores_, maha * (n - 1) / n,
+                        rtol=1e-6)
+
+    def test_minor_component_score(self):
+        clf = PCA(n_selected_components=1).fit(self.X)
+        X_std = clf.scaler_.transform(self.X)
+        proj = (X_std - clf.mean_) @ clf.components_[-1]
+        expected = proj ** 2 / clf.explained_variance_[-1]
+        assert_allclose(clf.decision_scores_, expected, rtol=1e-6)
+
+    def test_off_correlation_outlier_ranked_first(self):
+        X_with_outlier = np.vstack([self.X, [[1.5, -1.5]]])
+        scores = PCA().fit(X_with_outlier).decision_scores_
+        assert_equal(np.argmax(scores), len(X_with_outlier) - 1)
+
+    def test_score_is_symmetric_around_center(self):
+        center = self.X.mean(axis=0)
+        P = np.array([[0.5, -0.5], [1.0, 2.0]])
+        assert_allclose(self.clf.decision_function(P),
+                        self.clf.decision_function(2 * center - P),
+                        rtol=1e-6)
+
+    def test_sign_flip_invariance(self):
+        before = self.clf.decision_function(self.X)
+        self.clf.selected_components_ = -self.clf.selected_components_
+        after = self.clf.decision_function(self.X)
+        self.clf.selected_components_ = -self.clf.selected_components_
+        assert_allclose(before, after, rtol=1e-12)
+
+    def test_center_has_zero_score(self):
+        center = self.X.mean(axis=0, keepdims=True)
+        assert_allclose(self.clf.decision_function(center), 0, atol=1e-8)
+
+    def test_decision_function_matches_single_sample(self):
+        # Guards against centering with the test batch mean (as in PR #340)
+        assert_allclose(self.clf.decision_function(self.X[:1]),
+                        self.clf.decision_scores_[:1], rtol=1e-6)
+
+    def test_whiten_does_not_change_scores(self):
+        clf_white = PCA(whiten=True).fit(self.X)
+        assert_allclose(self.clf.decision_scores_,
+                        clf_white.decision_scores_, rtol=1e-6)
+        assert_allclose(self.clf.decision_function(self.X[:5]),
+                        clf_white.decision_function(self.X[:5]), rtol=1e-6)
 
 
 if __name__ == '__main__':
