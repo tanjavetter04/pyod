@@ -8,7 +8,6 @@
 import warnings
 
 import numpy as np
-from scipy.spatial.distance import cdist
 from sklearn.decomposition import PCA as sklearn_PCA
 from sklearn.utils.validation import check_array
 from sklearn.utils.validation import check_is_fitted
@@ -37,8 +36,11 @@ class PCA(BaseDetector):
     distance of a sample on all eigenvectors.
     See :cite:`shyu2003novel,aggarwal2015outlier` for details.
 
-    Score(X) = Sum of weighted euclidean distance between each sample to the
-    hyperplane constructed by the selected eigenvectors
+    Score(X) = Sum over the selected eigenvectors v_j of y_j^2 / lambda_j,
+    where y_j = (X - mean) . v_j is the projection of the centered sample
+    onto v_j and lambda_j the corresponding eigenvalue (Shyu et al., 2003).
+    Summed over all components this equals the squared Mahalanobis
+    distance.
 
     Parameters
     ----------
@@ -260,13 +262,13 @@ class PCA(BaseDetector):
         # use eigenvalues as the weights of eigenvectors
         self.w_components_ = np.ones([self.n_components_, ])
         if self.weighted:
-            self.w_components_ = self.detector_.explained_variance_ratio_
+            self.w_components_ = self.detector_.explained_variance_
 
-        # outlier scores is the sum of the weighted distances between each
-        # sample to the eigenvectors. The eigenvectors with smaller
-        # eigenvalues have more influence
+        # outlier score is the sum of the squared projections of each
+        # centered sample onto the eigenvectors, divided by the eigenvalues.
+        # The eigenvectors with smaller eigenvalues have more influence.
         # Not all eigenvectors are used, only n_selected_components_ smallest
-        # are used since they better reflect the variance change
+        # are used since they better reflect the variance change.
 
         components = self.components_
         weights = self.w_components_
@@ -294,9 +296,7 @@ class PCA(BaseDetector):
         self.selected_components_ = components[start:]
         self.selected_w_components_ = weights[start:]
 
-        self.decision_scores_ = np.sum(
-            cdist(X, self.selected_components_) / self.selected_w_components_,
-            axis=1).ravel()
+        self.decision_scores_ = self._score_samples(X)
 
         self._process_decision_scores()
         return self
@@ -325,9 +325,18 @@ class PCA(BaseDetector):
         if self.standardization:
             X = self.scaler_.transform(X)
 
-        return np.sum(
-            cdist(X, self.selected_components_) / self.selected_w_components_,
-            axis=1).ravel()
+        return self._score_samples(X)
+
+    def _score_samples(self, X):
+        """Weighted squared projections onto the selected components.
+
+        X is expected to be standardized already (if standardization=True).
+        The projection is computed explicitly so that the score does not
+        depend on the ``whiten`` setting of the underlying sklearn PCA.
+        """
+        projections = (X - self.detector_.mean_) @ self.selected_components_.T
+        return np.sum(projections ** 2 / self.selected_w_components_,
+                      axis=1).ravel()
 
     @property
     def explained_variance_(self):
